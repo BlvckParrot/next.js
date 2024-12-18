@@ -235,6 +235,7 @@ function getBaseSWCOptions({
     // On server side of pages router we prefer CJS.
     preferEsm: esm,
     lintCodemodComments: true,
+    trackDynamicImports: isDynamicIo,
     debugFunctionName: development,
 
     ...(supportedBrowsers && supportedBrowsers.length > 0
