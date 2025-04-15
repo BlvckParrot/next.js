@@ -22,6 +22,7 @@ mod path_visitor;
 pub mod references;
 pub mod runtime_functions;
 pub mod side_effect_optimization;
+pub mod simple_tree_shake;
 pub(crate) mod special_cases;
 pub(crate) mod static_code;
 mod swc_comments;
@@ -122,6 +123,7 @@ pub enum SpecifiedModuleType {
     Default,
     Serialize,
     Deserialize,
+    TaskInput,
     TraceRawVcs,
     NonLocalValue,
 )]
@@ -161,6 +163,8 @@ pub struct EcmascriptOptions {
     /// parsing fails. This is useful to keep the module graph structure intact when syntax errors
     /// are temporarily introduced.
     pub keep_last_successful_parse: bool,
+
+    pub unused_export_removal: bool,
 }
 
 #[turbo_tasks::value(serialization = "auto_for_input")]
@@ -417,6 +421,7 @@ impl EcmascriptAnalyzable for EcmascriptModuleAsset {
         chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
         async_module_info: Option<ResolvedVc<AsyncModuleInfo>>,
     ) -> Result<Vc<EcmascriptModuleContent>> {
+        let self_resolved = self.to_resolved().await?;
         let parsed = self.parse().to_resolved().await?;
 
         let analyze = self.analyze();
@@ -427,8 +432,11 @@ impl EcmascriptAnalyzable for EcmascriptModuleAsset {
             .reference_module_source_maps(Vc::upcast(self))
             .await?;
 
+        let unused_export_removal = self_resolved.options().await?.unused_export_removal;
+
         Ok(EcmascriptModuleContent::new(
             EcmascriptModuleContentOptions {
+                module: ResolvedVc::upcast(self_resolved),
                 parsed,
                 ident: self.ident().to_resolved().await?,
                 specified_module_type: module_type_result.module_type,
@@ -442,6 +450,7 @@ impl EcmascriptAnalyzable for EcmascriptModuleAsset {
                 original_source_map: analyze_ref.source_map,
                 exports: analyze_ref.exports,
                 async_module_info,
+                unused_export_removal,
             },
         ))
     }
@@ -785,6 +794,7 @@ pub struct EcmascriptModuleContent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TaskInput, TraceRawVcs)]
 pub struct EcmascriptModuleContentOptions {
+    module: ResolvedVc<Box<dyn EcmascriptChunkPlaceable>>,
     parsed: ResolvedVc<ParseResult>,
     ident: ResolvedVc<AssetIdent>,
     specified_module_type: SpecifiedModuleType,
@@ -798,6 +808,7 @@ pub struct EcmascriptModuleContentOptions {
     original_source_map: ResolvedVc<OptionStringifiedSourceMap>,
     exports: ResolvedVc<EcmascriptExports>,
     async_module_info: Option<ResolvedVc<AsyncModuleInfo>>,
+    unused_export_removal: bool,
 }
 
 #[turbo_tasks::value_impl]
@@ -806,6 +817,7 @@ impl EcmascriptModuleContent {
     #[turbo_tasks::function]
     pub async fn new(input: EcmascriptModuleContentOptions) -> Result<Vc<Self>> {
         let EcmascriptModuleContentOptions {
+            module,
             parsed,
             ident,
             specified_module_type,
@@ -819,6 +831,7 @@ impl EcmascriptModuleContent {
             original_source_map,
             exports,
             async_module_info,
+            unused_export_removal,
         } = input;
 
         let (esm_code_gens, additional_code_gens, code_gens) = async {
@@ -839,7 +852,13 @@ impl EcmascriptModuleContent {
                 if let EcmascriptExports::EsmExports(exports) = *exports.await? {
                     Some(
                         exports
-                            .code_generation(*module_graph, *chunking_context, Some(*parsed))
+                            .code_generation(
+                                *module_graph,
+                                *chunking_context,
+                                module,
+                                Some(*parsed),
+                                unused_export_removal,
+                            )
                             .await?,
                     )
                 } else {
