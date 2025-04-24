@@ -853,7 +853,7 @@ impl EcmascriptModuleContent {
                     Some(
                         exports
                             .code_generation(
-                                *module_graph,
+                                module_graph,
                                 *chunking_context,
                                 module,
                                 Some(*parsed),

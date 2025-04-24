@@ -81,7 +81,7 @@ impl EcmascriptChunkItem for EcmascriptModuleFacadeChunkItem {
                 .await?,
             exports
                 .code_generation(
-                    *self.module_graph,
+                    self.module_graph,
                     *chunking_context,
                     ResolvedVc::upcast(self.module),
                     None,
