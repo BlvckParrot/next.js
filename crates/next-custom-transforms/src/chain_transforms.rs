@@ -339,6 +339,7 @@ where
             match &opts.track_dynamic_imports {
                 true => Either::Left(
                     crate::transforms::track_dynamic_imports::track_dynamic_imports(
+                        unresolved_mark,
                         comments.clone(),
                     ),
                 ),

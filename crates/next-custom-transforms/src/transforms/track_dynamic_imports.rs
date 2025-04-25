@@ -1,9 +1,11 @@
+use std::iter;
+
 use serde::Deserialize;
 use swc_core::{
-    common::{comments::Comments, util::take::Take, Span},
+    common::{comments::Comments, util::take::Take, Mark, Span, SyntaxContext},
     ecma::{
         ast::*,
-        utils::private_ident,
+        utils::{prepend_stmts, private_ident, quote_ident},
         visit::{noop_visit_mut_type, visit_mut_pass, VisitMut, VisitMutWith},
     },
     quote,
@@ -13,12 +15,16 @@ use swc_core::{
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {}
 
-pub fn track_dynamic_imports<C: Comments>(comments: C) -> impl VisitMut + Pass {
-    visit_mut_pass(ImportReplacer::new(comments))
+pub fn track_dynamic_imports<C: Comments>(
+    unresolved_mark: Mark,
+    comments: C,
+) -> impl VisitMut + Pass {
+    visit_mut_pass(ImportReplacer::new(unresolved_mark, comments))
 }
 
 struct ImportReplacer<C> {
     comments: C,
+    unresolved_ctxt: SyntaxContext,
     has_dynamic_import: bool,
     wrapper_function_local_ident: Ident,
 }
@@ -27,9 +33,10 @@ impl<C> ImportReplacer<C>
 where
     C: Comments,
 {
-    pub fn new(comments: C) -> Self {
+    pub fn new(unresolved_mark: Mark, comments: C) -> Self {
         ImportReplacer {
             comments,
+            unresolved_ctxt: SyntaxContext::empty().apply_mark(unresolved_mark),
             has_dynamic_import: false,
             wrapper_function_local_ident: private_ident!("$$trackDynamicImport__"),
         }
@@ -42,19 +49,42 @@ where
 {
     noop_visit_mut_type!(); // TODO: what does this do?
 
-    fn visit_mut_module_items(&mut self, stmts: &mut Vec<ModuleItem>) {
-        stmts.visit_mut_children_with(self);
+    fn visit_mut_program(&mut self, program: &mut Program) {
+        program.visit_mut_children_with(self);
+        // if we wrapped a dynamic import while visiting the children, we need to import the wrapper
 
         if self.has_dynamic_import {
-            // if we wrapped a dynamic import above, we need to import the wrapper
-            stmts.insert(
-                0,
-                quote!(
-                    "import { trackDynamicImport as $wrapper_fn } from \
-                     'private-next-rsc-track-dynamic-import'" as ModuleItem,
-                    wrapper_fn = self.wrapper_function_local_ident.clone()
-                ),
-            );
+            match program {
+                Program::Module(module) => {
+                    prepend_stmts(
+                        &mut module.body,
+                        iter::once(quote!(
+                            "import { trackDynamicImport as $wrapper_fn } from \
+                             'private-next-rsc-track-dynamic-import'"
+                                as ModuleItem,
+                            wrapper_fn = self.wrapper_function_local_ident.clone()
+                        )),
+                    );
+                }
+                Program::Script(script) => {
+                    // CJS modules can still use `import()`. for CJS, we have to inject the helper
+                    // using `require` instead of `import` to avoid accidentally turning them
+                    // into ESM modules.
+                    prepend_stmts(
+                        &mut script.body,
+                        iter::once(quote!(
+                            "const { trackDynamicImport: $wrapper_fn } = \
+                             $require('private-next-rsc-track-dynamic-import')"
+                                as Stmt,
+                            wrapper_fn = self.wrapper_function_local_ident.clone(),
+                            // the builtin `require` is considered an unresolved identifier.
+                            // we have to match that, or it won't be recognized as
+                            // a proper `require()` call.
+                            require = quote_ident!(self.unresolved_ctxt, "require")
+                        )),
+                    );
+                }
+            }
         }
     }
 
